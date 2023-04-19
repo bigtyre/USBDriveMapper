@@ -9,8 +9,7 @@ namespace BigTyre.DiskMount.Configuration
     internal class AppSettings
     {
         public string TargetDirectory { get; set; } = "";
-        public List<Volumes> Volumes { get; set; } = new List<Volumes>();
-        //public List<string> VolumeNames { get; set; } = new List<string>();
+        public List<Volume> Volumes { get; set; } = new List<Volume>();
         public int CheckFrequencyInSeconds { get; set; }
         public int UnlockingAttempts { get; set; }
     }

@@ -15,12 +15,13 @@ using System.Security;
 using System.Windows.Forms;
 using System.Security.Cryptography.X509Certificates;
 using System.Configuration;
+using System.Text.RegularExpressions;
 
 namespace DriveChecker;
 
 internal class Program
 {
-    public static Volumes Volume { get; set; }
+    public static Volume Volume { get; set; }
     public static int CountUnlockingAttempt { get; set; } = 0;
     public static int UnlockingAttempts { get; set; }
     static async Task Main(string[] args)
@@ -34,8 +35,8 @@ internal class Program
         var principal = new WindowsPrincipal(identity);
         if (!principal.IsInRole(WindowsBuiltInRole.Administrator))
         {
-            Console.WriteLine("Warning: This app must be run as Administrator.");
-            return;
+            Console.WriteLine("Warning: This app should be run as Administrator or a system account.");
+            //return;
         }
 
         var settings = GetSettings(args);
@@ -50,18 +51,21 @@ internal class Program
         {
             if(Volume == null) RemapVolumes();
 
+            var delay = checkInterval;
+
             try
             {
                 bool isEmpty = false;
                 do
                 {
-                    //CheckBitLockerEncryptionLevel(targetDirectory);
-
-                    Console.WriteLine($"Enumerating file system entries in {targetDirectory}");
+                    //Console.WriteLine($"Trying to get files in {targetDirectory}");
                     var paths = Directory.EnumerateFileSystemEntries(targetDirectory);
                     isEmpty = !paths.Any();
 
-                    if (isEmpty)
+                    if (!isEmpty)
+                    {
+                    }
+                    else
                     {
                         Console.WriteLine("Path is Empty! Alert!");
                         try
@@ -69,7 +73,7 @@ internal class Program
                             bool anyDriveMapped = RemapVolumes();
                             if (!anyDriveMapped)
                             {
-                                await Task.Delay(1000);
+                                await Task.Delay(500);
                             }
                         }
                         catch (Exception)
@@ -86,62 +90,72 @@ internal class Program
             }
             catch (IOException ex)
             {
-                CatchBitLockerException(ex.Message);
+                HandleIOException(Volume, ex.Message);
+                delay = TimeSpan.FromSeconds(1);
             }
             catch (Exception ex) {
                 Console.WriteLine(ex.Message);
             }
 
-            await Task.Delay(checkInterval);
+            await Task.Delay(delay);
         }
     }
 
-    private static void CatchBitLockerException(string message)
+    private static void HandleIOException(Volume volume, string message)
     {
-        if(message.Contains("This drive is locked by BitLocker Drive Encryption") == true)
+        bool isBitLockerException = message.Contains("This drive is locked by BitLocker Drive Encryption", StringComparison.OrdinalIgnoreCase);
+        if (isBitLockerException is false)
         {
-            Console.WriteLine("This drive is locked by BitLocker Drive Encryption");
-            string volumeDir;
-            if (IsDriveNTFS(message))
-            {
-                volumeDir = getTargetDrive(message, "'", "'");
-            }
-            else
-            {
-                volumeDir = getTargetDrive(message, "'", ":") + ":";
+            Console.WriteLine(message);
+            return;
+        }
 
-            }
-            Console.WriteLine(volumeDir);
-            if (volumeDir != null)
-            {
-                DecryptBitLockerEncryption($"{volumeDir}");
-            }
-            else
-            {
-                Console.WriteLine("Failed to map the targe directory. Remapping");
-            }
-        } else { Console.WriteLine(message); }
+
+        Console.WriteLine("This drive/directory is locked by BitLocker Drive Encryption");
+        string volumeDir;
+        if (IsTargetADirectory(message))
+        {
+            volumeDir = GetTargetDriveFromMessage(message, "'", "'");
+        }
+        else
+        {
+            volumeDir = GetTargetDriveFromMessage(message, "'", ":") + ":";
+        }
+
+        Console.WriteLine(volumeDir);
+
+        if (volumeDir != null)
+        {
+            Console.WriteLine($"Attempting to unlock BitLocker volume: '{volumeDir}'.");
+            DecryptBitLockerEncryption(volume, $"{volumeDir}");
+        }
+        else
+        {
+            Console.WriteLine("Failed to map the target directory. Remapping");
+        }
     }
 
-    private static bool IsDriveNTFS(string message)
+    private static bool IsTargetADirectory(string message)
     {
         bool isNtfs = false;
-        string ntfsVolumeDrive = getTargetDrive(message, "'", "'");
+        string ntfsVolumeDrive = GetTargetDriveFromMessage(message, "'", "'");
             if(ntfsVolumeDrive != null && ntfsVolumeDrive.Length > 4) isNtfs = true;
         return isNtfs;
     }
 
-    private static string getTargetDrive(string message, string start, string end)
+    private static string GetTargetDriveFromMessage(string message, string start, string end)
     {
-        if(message.Contains(start) && message.Contains(end))
+        if (!message.Contains(start) || !message.Contains(end))
         {
-            int Start, End;
-            Start = message.IndexOf(start, 0) + start.Length;
-            End = message.IndexOf(end, Start);
-            return message.Substring(Start, End - Start);
+            return string.Empty;
         }
-        return "";
+
+        int Start, End;
+        Start = message.IndexOf(start, 0) + start.Length;
+        End = message.IndexOf(end, Start);
+        return message.Substring(Start, End - Start);
     }
+    /*
     private static void CheckBitLockerEncryptionLevel(string targetDir)
     {
         try {
@@ -169,7 +183,7 @@ internal class Program
                  * 3: BitLocker Encrypting
                  * 5: BitLocker Suspended
                  * 6: BitLocker On (Locked)
-                 */
+                 *
 
                 if (bitLockerEncrptionStatus == 1 || bitLockerEncrptionStatus == 3 || bitLockerEncrptionStatus == 5)
                 {
@@ -188,46 +202,82 @@ internal class Program
             Console.WriteLine(ex.Message);
         }
     }
-
-    private static void DecryptBitLockerEncryption(string targetDir)
+    */
+    private static void DecryptBitLockerEncryption(Volume volume, string targetDir)
     { 
-        string password = Volume.BitLockerPassword;
-        if(String.IsNullOrEmpty(password)) { Console.WriteLine("Password is empty in the App Settings. Please update and restart the service."); return; }
+        try {
+            Console.WriteLine($"{nameof(DecryptBitLockerEncryption)} started");
+
+            string password = volume.BitLockerPassword;
+            if(string.IsNullOrEmpty(password)) { 
+                Console.WriteLine("Password is empty in the App Settings. Please update and restart the service."); 
+                return; 
+            }
         
-        Console.WriteLine("Unlocking the Drive");
-        if(CountUnlockingAttempt >= UnlockingAttempts)
-        {
-            Console.WriteLine($"Attempt {CountUnlockingAttempt}: Failed to unlock the driver due to wrong credentials. Please update the App Settings");
+            Console.WriteLine($"Attempting to unlock {volume.Title}, target dir: {targetDir}");
+            if(CountUnlockingAttempt >= UnlockingAttempts)
+            {
+                Console.WriteLine($"Attempt {CountUnlockingAttempt}: Failed to unlock the driver due to wrong credentials. Please update the App Settings");
+            }
+
+            var escapedPassword = EscapeForPowerShell(password);
+
+            string secureString = $"$SecureString = ConvertTo-SecureString '{escapedPassword}' -AsPlainText -Force";
+            string mountPoint = $"Unlock-BitLocker -MountPoint \"{targetDir}\" -Password $SecureString";
+            string unlockBitLocker = secureString + "; " + mountPoint;
+
+
+            var startInfo = new ProcessStartInfo
+            {
+              FileName = "powershell.exe",
+              Arguments = unlockBitLocker,
+              //UseShellExecute = true,
+              Verb = "runas",
+              CreateNoWindow = true,
+              WindowStyle = ProcessWindowStyle.Hidden,
+              RedirectStandardOutput = true
+            };
+
+            var process = Process.Start(startInfo);
+            process.WaitForExit();
+
+            var output = process.StandardOutput.ReadToEnd();
+            Console.WriteLine(output);
+
+            CountUnlockingAttempt++;
         }
-        
-        string secureString = $"$SecureString = ConvertTo-SecureString '{password}' -AsPlainText -Force";
-        string mountPoint = $"Unlock-BitLocker -MountPoint \"{targetDir}\" -Password $SecureString";
-        string unlockBitLocker = secureString + "; " + mountPoint;
-
-        ProcessStartInfo startInfo = new ProcessStartInfo
+        catch (Exception ex)
         {
-          FileName = "powershell.exe",
-          Arguments = unlockBitLocker,
-          UseShellExecute = true,
-          Verb = "runas",
-          CreateNoWindow = true,
-          WindowStyle = ProcessWindowStyle.Hidden,
-        };
-
-        var process = Process.Start(startInfo);
-        process.WaitForExit();
-        CountUnlockingAttempt++;
+            Console.WriteLine($"Encountered an error in {nameof(DecryptBitLockerEncryption)}: {ex.Message}");
+            throw;
+        }
+        finally
+        {
+            Console.WriteLine($"{nameof(DecryptBitLockerEncryption)} finished");
+        }
     }
 
+    private static readonly Regex CharactersToEscape = new(@"['""$]"); // Extend the character set as required
+
+    public static string EscapeForPowerShell(string input)
+    {
+        // $& is the characters that were matched
+        return CharactersToEscape.Replace(input, "`$&");
+    }
     private static AppSettings GetSettings(string[] args)
     {
         var configBuilder = new ConfigurationBuilder();
         configBuilder.AddJsonFile("appSettings.json", optional: true);
         configBuilder.AddJsonFile(Path.Combine(Directory.GetCurrentDirectory(), "appSettings.json"), optional: true);
+
+        var programDataPath = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+        var programDataSettingsFilePath = Path.Combine(programDataPath, @"Big Tyre\Backup HDD Attacher\appSettings.json");
+
+        configBuilder.AddJsonFile(programDataSettingsFilePath, optional: true);
         configBuilder.AddCommandLine(args);
 #if DEBUG
         configBuilder.AddUserSecrets<Program>();
-#endif 
+#endif
         var config = configBuilder.Build();
 
         var settings = new AppSettings();
@@ -236,16 +286,20 @@ internal class Program
         return settings;
     }
 
-    static bool TryRemapVolumes(string targetDirectory, List<Volumes> volumes)
+    static bool TryRemapVolumes(string targetDirectory, List<Volume> volumes)
     {
         Console.WriteLine($"Attempting to remap volumes.");
 
         UnmountTargetDirectory(targetDirectory);
-        List<string> volumeNames = volumes.Select(v => v.VolumeName).ToList();
 
-        foreach (var vol in volumeNames)
+        foreach (var volume in volumes)
         {
-            var args = @$"{targetDirectory} {vol}";
+            var volumeLabel = volume.Title;
+            var volumeName = volume.VolumeName;
+            Console.WriteLine($"Attempting to mount volume {volumeLabel}");
+
+            var args = @$"{targetDirectory} {volumeName}";
+
             Console.WriteLine($"mountvol {args}");
             var startInfo = new ProcessStartInfo("mountvol", args)
             {
@@ -253,13 +307,15 @@ internal class Program
                 WindowStyle = ProcessWindowStyle.Hidden,
                 CreateNoWindow = true,
             };
+
             var process = Process.Start(startInfo);
             process.WaitForExit();
+
             var exitCode = process.ExitCode;
             if (exitCode == 0)
             {
                 Console.WriteLine($"Successfully mapped volume to {targetDirectory}.");
-                Volume = volumes.FirstOrDefault(v => v.VolumeName == vol);
+                Volume = volume;
                 CountUnlockingAttempt = 0;
                 return true;
             }

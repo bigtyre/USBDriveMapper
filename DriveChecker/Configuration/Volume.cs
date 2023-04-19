@@ -1,6 +1,6 @@
 ﻿namespace BigTyre.DiskMount.Configuration
 {
-    internal class Volumes
+    internal class Volume
     {
         public string Title { get; set; }
         public string VolumeName { get; set; }
